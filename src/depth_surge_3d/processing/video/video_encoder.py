@@ -103,6 +103,12 @@ class VideoEncoder:
                 print(f"Extracting audio from original video: {original_video}")
                 cmd.extend(["-i", original_video, "-c:a", "aac", "-shortest"])
 
+        # Explicit stream mapping: force video from VR frames (input 0), audio from input 1.
+        # Without -map, FFmpeg may select the original video's stream for output,
+        # overriding the VR frame resolution. (BUG: portrait SBS, 2026-08-01)
+        if settings.get("preserve_audio", True):
+            cmd.extend(["-map", "0:v", "-map", "1:a"])
+
         # Add video encoding settings
         encoder = settings.get("video_encoder", "auto")
         encoder_args, _ = self._build_encoder_cmd(encoder, output_path)
