@@ -27,6 +27,18 @@ from ...utils import (
 )
 
 
+class NullProgressTracker:
+    """No-op progress tracker for CLI mode (no UI)."""
+    def update_progress(self, *args, **kwargs):
+        pass
+    def send_preview_frame(self, *args, **kwargs):
+        pass
+    def send_preview_frame_from_array(self, *args, **kwargs):
+        pass
+    def finish(self, *args, **kwargs):
+        pass
+
+
 class ProcessingOrchestrator:
     """
     High-level pipeline control and step sequencing.
@@ -99,6 +111,9 @@ class ProcessingOrchestrator:
             - Filesystem state management
             - Delegates to all processor modules
         """
+        # Substitute a no-op tracker in CLI mode so downstream code never sees None
+        if progress_tracker is None:
+            progress_tracker = NullProgressTracker()
         try:
             # Start timer
             self._start_time = time.time()

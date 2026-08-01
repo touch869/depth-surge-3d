@@ -67,9 +67,9 @@ Note: Always uses Video-Depth-Anything for temporal consistency across frames.
     available_resolutions = list(VR_RESOLUTIONS.keys()) + ["auto", "custom"]
     parser.add_argument(
         "--vr-resolution",
-        choices=available_resolutions,
+        type=str,
         default=DEFAULT_SETTINGS["vr_resolution"],
-        help="VR output resolution per eye (default: %(default)s)",
+        help="VR output resolution per eye (default: %(default)s). Custom: custom:WIDTHxHEIGHT",
     )
 
     parser.add_argument(
@@ -113,6 +113,8 @@ Note: Always uses Video-Depth-Anything for temporal consistency across frames.
         default=DEFAULT_SETTINGS["fisheye_fov"],
         help=f'Fisheye field of view in degrees (default: {DEFAULT_SETTINGS["fisheye_fov"]})',
     )
+    parser.add_argument("--depth-resolution", default=None,
+                help="Depth model input resolution (auto/518/448/384)")
     parser.add_argument(
         "--no-distortion",
         action="store_true",
@@ -456,6 +458,7 @@ def main():  # noqa: C901
             keep_intermediates=not args.no_intermediates,
             target_fps=args.target_fps,
             experimental_frame_interpolation=args.experimental_frame_interpolation,
+            depth_resolution=args.depth_resolution,
         )
 
         if success:

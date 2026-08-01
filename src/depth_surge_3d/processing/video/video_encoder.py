@@ -223,6 +223,9 @@ class VideoEncoder:
         Side effects:
             - Executes FFmpeg subprocess for encoder detection
         """
+        # PATCHED: NVENC detected but preset p7/tune hq incompatible with this ffmpeg build.
+        # Disable NVENC to use reliable libx264 software encoding instead.
+        return False
         test_result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True
         )

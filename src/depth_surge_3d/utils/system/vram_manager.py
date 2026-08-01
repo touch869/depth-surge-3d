@@ -69,8 +69,10 @@ def estimate_frame_vram_usage(
 
     # Model-specific overhead
     if model_version == "v2":
-        # V2 uses temporal windows and has higher memory overhead
-        model_overhead = 0.15  # ~150MB per frame for temporal processing
+        # V2 processes 32-frame batches through DINOv2 spatial self-attention.
+        # Each frame adds ~1GB including its share of attention matrices.
+        # The 0.15 estimate is dangerously low and causes OOM.
+        model_overhead = 1.0  # ~1GB per frame for V2 temporal-spatial processing
     else:
         # V3 is more memory efficient
         model_overhead = 0.08  # ~80MB per frame
@@ -134,7 +136,7 @@ def calculate_optimal_chunk_size(
 
     # Apply constraints
     min_chunk = 2 if model_version == "v3" else 4  # V3 more flexible
-    max_chunk = 32 if model_version == "v2" else 24  # V2 prefers 32-frame windows
+    max_chunk = 12 if model_version == "v2" else 24  # V2: capped at 12 to prevent OOM on 24GB GPUs
 
     # Clamp to reasonable range
     optimal_chunks = max(min_chunk, min(optimal_chunks, max_chunk))

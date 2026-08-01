@@ -56,22 +56,30 @@ def depth_to_disparity(depth_map: np.ndarray, baseline: float, focal_length: flo
     """
     Convert depth map to disparity map for stereo generation.
 
+    PATCHED: the original formula treated normalized 0-1 depth as metric
+    depth*10m, which for DA3 output (depth ~0-1) exploded disparity to
+    2800+ px, blowing out the whole frame into black artifacts + cropping.
+    Now map depth directly to a bounded pixel disparity: near (bright) ->
+    max disparity, far (dark) -> 0. Range controlled by baseline: larger
+    baseline = stronger 3D.
+
     Args:
         depth_map: Normalized depth map (0-1 range)
-        baseline: Stereo baseline in meters
+        baseline: Stereo baseline in meters (used as strength scaling)
         focal_length: Camera focal length in pixels
 
     Returns:
-        Disparity map array
+        Disparity map array (pixels, 0..max_disp)
     """
-    # Avoid division by zero
-    safe_depth = np.where(depth_map > 0.001, depth_map, 0.001)
+    # Clamp input to 0-1
+    depth = np.clip(depth_map.astype(np.float32), 0.0, 1.0)
 
-    # Convert normalized depth to actual depth (assuming 1 unit = 10 meters)
-    actual_depth = safe_depth * 10.0
+    # Max disparity in pixels. Scale with baseline so 0.065 (default IPD)
+    # gives ~12px on 1080p, matching HypoX64 sweet spot.
+    max_disp = int(focal_length * baseline * 0.19)   # ~12px @ focal=1000, baseline=0.065
 
-    # Calculate disparity: d = (baseline * focal_length) / depth
-    disparity = (baseline * focal_length) / actual_depth
+    # Near = high depth value -> large disparity; far -> 0
+    disparity = (1.0 - depth) * max_disp
 
     return disparity
 

@@ -54,7 +54,7 @@ DEFAULT_SETTINGS = {
     "crop_factor": 1.0,  # default: 1.0 (no crop)
     "fisheye_crop_factor": 0.7,  # default: 0.7 (zoom into center ~70%, crops ~20% each edge to hide distortion)
     "hole_fill_quality": "fast",
-    "super_sample": "auto",
+    "super_sample": "none",  # PATCHED: auto upscales to 2x per_eye (4K) causing depth/frame shape mismatch
     "target_fps": 60,
     "min_resolution": "1080p",
     "preserve_audio": True,
@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "temporal_window_size": DEPTH_MODEL_CHUNK_SIZE,  # V2 only: frames per temporal window
     "temporal_window_overlap": DEPTH_MODEL_CHUNK_OVERLAP,  # V2 only: frame overlap between windows
     "upscale_model": "none",  # AI upscaling: none, x2, x4, x4-conservative
+    "depth_resolution": "auto",  # depth model input resolution (auto/518/448/384)
 }
 
 # VR resolution configurations (per eye)

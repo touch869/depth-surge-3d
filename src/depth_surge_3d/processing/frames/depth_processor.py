@@ -175,6 +175,15 @@ class DepthMapProcessor:
             else "base"
         )
 
+        # Cap input_size for VDA v2 to prevent OOM (model designed for 518px input)
+        # depth-surge auto-resolution overrides the model's default, causing
+        # spatial self-attention explosion in DINOv2 backbone with 32-frame batches
+        if model_version == "v2":
+            from depth_surge_3d.core.constants import DEPTH_MODEL_INPUT_SIZE
+            if input_size > DEPTH_MODEL_INPUT_SIZE:
+                print(f"  Capping input_size for v2: {input_size} -> {DEPTH_MODEL_INPUT_SIZE}px (model default, prevents OOM)")
+                input_size = DEPTH_MODEL_INPUT_SIZE
+
         # Calculate optimal chunk size based on VRAM
         if vram_info["total"] > 0:
             # Use smart VRAM-based sizing
@@ -448,6 +457,14 @@ class DepthMapProcessor:
                     input_size = int(depth_resolution)
                 except (ValueError, TypeError):
                     input_size = 1080
+
+            # Cap input_size for VDA v2 to prevent OOM (model designed for 518px)
+            model_version = "v3" if hasattr(self.depth_estimator, "model_type") else "v2"
+            if model_version == "v2":
+                from depth_surge_3d.core.constants import DEPTH_MODEL_INPUT_SIZE
+                if input_size > DEPTH_MODEL_INPUT_SIZE:
+                    print(f"  Capping input_size for v2: {input_size} -> {DEPTH_MODEL_INPUT_SIZE}px (model default, prevents OOM)")
+                    input_size = DEPTH_MODEL_INPUT_SIZE
 
             depth_maps = self.depth_estimator.estimate_depth_batch(
                 frames, target_fps=target_fps, input_size=input_size, fp32=False

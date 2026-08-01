@@ -107,7 +107,7 @@ class StereoPairGenerator:
         """
         try:
             # Determine number of worker processes (leave 1-2 cores for system)
-            num_workers = max(1, mp.cpu_count() - 2)
+            num_workers = min(8, max(1, mp.cpu_count() - 2))  # PATCHED: cap at 8 to avoid 62-worker fork abort on 1080p frames
             print(f"  Using {num_workers} parallel workers for stereo generation...")
 
             # Prepare arguments for parallel processing
@@ -129,32 +129,31 @@ class StereoPairGenerator:
 
                 args_list.append((frame, depth_map, frame_name, left_path, right_path, settings))
 
-            # Process stereo pairs in parallel
-            with mp.Pool(processes=num_workers) as pool:
-                # Use imap for progress tracking (processes in order, yields results as ready)
-                results = []
-                for i, result in enumerate(pool.imap(_process_single_stereo_pair, args_list)):
-                    results.append(result)
+            # Process stereo pairs (PATCHED: serial - mp.Pool fork aborts with CUDA model loaded)
+            results = []
+            for i, args in enumerate(args_list):
+                result = _process_single_stereo_pair(args)
+                results.append(result)
 
-                    # Update progress
-                    if i % 5 == 0 or i == len(args_list) - 1:
-                        progress_tracker.update_progress(
-                            "Creating stereo pairs",
-                            phase="stereo_generation",
-                            frame_num=i + 1,
-                            step_name="Stereo Pair Creation",
-                            step_progress=i + 1,
-                            step_total=len(frames),
-                        )
+                # Update progress
+                if progress_tracker is not None and (i % 5 == 0 or i == len(args_list) - 1):
+                    progress_tracker.update_progress(
+                        "Creating stereo pairs",
+                        phase="stereo_generation",
+                        frame_num=i + 1,
+                        step_name="Stereo Pair Creation",
+                        step_progress=i + 1,
+                        step_total=len(frames),
+                    )
 
-                    # Send preview frame for left eye
-                    if progress_tracker and hasattr(progress_tracker, "send_preview_frame"):
-                        if i % PREVIEW_FRAME_SAMPLE_RATE == 0 or i == len(args_list) - 1:
-                            left_path = args_list[i][3]  # left_path from args
-                            if left_path:
-                                progress_tracker.send_preview_frame(
-                                    Path(left_path), "stereo_left", i + 1
-                                )
+                # Send preview frame for left eye
+                if progress_tracker and hasattr(progress_tracker, "send_preview_frame"):
+                    if i % PREVIEW_FRAME_SAMPLE_RATE == 0 or i == len(args_list) - 1:
+                        left_path = args_list[i][3]  # left_path from args
+                        if left_path:
+                            progress_tracker.send_preview_frame(
+                                Path(left_path), "stereo_left", i + 1
+                            )
 
             return True
 

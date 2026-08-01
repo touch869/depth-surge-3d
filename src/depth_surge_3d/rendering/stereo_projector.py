@@ -91,6 +91,7 @@ class StereoProjector:
         hole_fill_quality: str | None = None,
         processing_mode: str | None = None,
         experimental_frame_interpolation: bool | None = None,
+        depth_resolution: str | None = None,
     ) -> bool:
         """
         Process video to create 3D VR version.
