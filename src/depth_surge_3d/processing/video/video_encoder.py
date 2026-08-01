@@ -107,7 +107,7 @@ class VideoEncoder:
         # Without -map, FFmpeg may select the original video's stream for output,
         # overriding the VR frame resolution. (BUG: portrait SBS, 2026-08-01)
         if settings.get("preserve_audio", True):
-            cmd.extend(["-map", "0:v", "-map", "1:a"])
+            cmd.extend(["-map", "0:v", "-map", "1:a?"])
 
         # Add video encoding settings
         encoder = settings.get("video_encoder", "auto")
