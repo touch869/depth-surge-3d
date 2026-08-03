@@ -26,8 +26,6 @@ from depth_surge_3d.utils import (  # noqa: E402
 )
 from depth_surge_3d.io.operations import (  # noqa: E402
     validate_video_file,
-    can_resume_processing,
-    load_processing_settings,
 )
 
 
@@ -41,7 +39,7 @@ Examples:
   %(prog)s video.mp4                                    # Basic conversion
   %(prog)s video.mp4 --vr-resolution 16x9-4k          # High quality 4K
   %(prog)s video.mp4 --vr-resolution custom:2560x1080 # Custom resolution
-  %(prog)s --resume ./output/my_video_output/          # Resume previous job
+  %(prog)s video.mp4 --resume -o ./output/my_job       # Continue an existing job (skip done work)
   %(prog)s --list-resolutions                          # Show available resolutions
 
 Note: Always uses Video-Depth-Anything for temporal consistency across frames.
@@ -58,9 +56,13 @@ Note: Always uses Video-Depth-Anything for temporal consistency across frames.
         help="Output directory (default: %(default)s)",
     )
 
-    # Resume functionality
+    # Resume functionality — continue an existing job in --output-dir, skipping
+    # frames/stages whose intermediates already exist (extracted frames, depth
+    # maps, rendered VR frames). Reuses --output-dir as-is (no timestamped subdir).
     parser.add_argument(
-        "--resume", metavar="DIRECTORY", help="Resume processing from an existing output directory"
+        "--resume",
+        action="store_true",
+        help="Continue an existing job in --output-dir: skip already-completed frames/stages",
     )
 
     # VR settings
@@ -199,17 +201,9 @@ Note: Always uses Video-Depth-Anything for temporal consistency across frames.
 
 def validate_arguments(args) -> bool:
     """Validate command line arguments."""
-
-    # Handle resume mode
-    if args.resume:
-        if not Path(args.resume).exists():
-            print(f"Error: Resume directory does not exist: {args.resume}")
-            return False
-        return True  # Skip other validations for resume mode
-
     # Regular mode validations
     if not args.input_video:
-        print("Error: Input video is required when not resuming")
+        print("Error: Input video is required")
         return False
 
     # Validate input video
@@ -319,74 +313,6 @@ def main():  # noqa: C901
         print(f"Cleared {count} cached video(s) from depth map cache")
         return 0
 
-    # Handle resume mode
-    if args.resume:
-        print(f"Checking resume capability for: {args.resume}")
-        resume_info = can_resume_processing(Path(args.resume))
-
-        if not resume_info["can_resume"]:
-            print("Cannot resume processing:")
-            for rec in resume_info["recommendations"]:
-                print(f"  - {rec}")
-            return 1
-
-        print("Can resume processing:")
-        print(f"  - Batch: {resume_info['batch_name']}")
-        print(f"  - Status: {resume_info['status']}")
-        if resume_info["progress_info"]:
-            progress = resume_info["progress_info"]
-            print(f"  - Progress: {progress['frames_processed']} frames processed")
-
-        for rec in resume_info["recommendations"]:
-            print(f"  - {rec}")
-
-        # Load settings from the settings file
-        settings_data = load_processing_settings(resume_info["settings_file"])
-        if not settings_data:
-            print("Could not load settings file")
-            return 1
-
-        # Extract video path and settings
-        video_path = settings_data["metadata"]["source_video"]
-        processing_settings = settings_data["processing_settings"]
-
-        # Create projector with original model settings
-        projector = create_stereo_projector(device=processing_settings.get("device", "auto"))
-
-        print("Resuming processing...")
-        print(f"Input: {video_path}")
-        print(f"Output: {args.resume}")
-
-        # Resume processing using original settings
-        success = projector.process_video(
-            video_path=video_path,
-            output_dir=args.resume,
-            **{
-                k: v
-                for k, v in processing_settings.items()
-                if k
-                not in [
-                    "output_dir",
-                    "device",
-                    "per_eye_width",
-                    "video_path",
-                    "per_eye_height",
-                    "vr_output_width",
-                    "vr_output_height",
-                    "source_width",
-                    "source_height",
-                    "source_fps",
-                ]
-            },
-        )
-
-        if success:
-            print("Resume processing completed successfully!")
-            return 0
-        else:
-            print("Resume processing failed. Check error messages above.")
-            return 1
-
     # Validate arguments for normal processing
     if not validate_arguments(args):
         return 1
@@ -428,8 +354,9 @@ def main():  # noqa: C901
 
         # Create batch-specific output directory
         if args.resume:
-            # Use existing directory for resume
-            batch_output_dir = args.resume
+            # Resume: reuse --output-dir verbatim (must be an existing job dir).
+            batch_output_dir = Path(args.output_dir)
+            print(f"RESUME mode: reusing existing job dir {batch_output_dir}")
         else:
             # Create new batch directory
             from datetime import datetime
@@ -459,6 +386,7 @@ def main():  # noqa: C901
             target_fps=args.target_fps,
             experimental_frame_interpolation=args.experimental_frame_interpolation,
             depth_resolution=args.depth_resolution,
+            resume=args.resume,
         )
 
         if success:

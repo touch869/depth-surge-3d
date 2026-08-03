@@ -184,6 +184,26 @@ class VideoEncoder:
         )
         expected_frames = end_frame - start_frame
 
+        # Resume: reuse the full extracted-frame set if it already exists on disk.
+        if settings.get("resume"):
+            existing = get_frame_files(frames_dir)
+            if existing and len(existing) >= expected_frames:
+                print(
+                    f"  RESUME: reusing {len(existing)} extracted frames "
+                    f"(expected {expected_frames})"
+                )
+                return existing
+            if existing:
+                # Partial set from a killed run — clear to avoid frame-index gaps.
+                print(
+                    f"  RESUME: partial frames ({len(existing)}/{expected_frames}), re-extracting"
+                )
+                for f in existing:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+
         # Convert frame numbers to timestamps for more efficient seeking
         start_time = start_frame / fps if fps > 0 else 0
         duration = expected_frames / fps if fps > 0 else 0

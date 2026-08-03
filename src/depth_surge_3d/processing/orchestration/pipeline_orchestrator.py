@@ -256,10 +256,26 @@ class ProcessingOrchestrator:
 
         print(title_bar("Streaming render (single-frame pipeline: stereo→crop→VR)"))
         print(f"  {num_frames} frames, per_eye={per_eye_w}x{per_eye_h}, crop_factor={crop_factor}")
+
+        # Resume: collect stems of VR frames already rendered in a previous
+        # (interrupted) run and skip them — only missing frames get rendered.
+        existing_vr: set[str] = set()
+        if settings.get("resume"):
+            existing_vr = {p.stem for p in vr_dir.glob("*.png")}
+            if existing_vr:
+                print(
+                    f"  RESUME: {len(existing_vr)} VR frames already rendered → skipping them"
+                )
+        skipped = 0
+        rendered = 0
         t0 = time.time()
 
         for i, (frame_file, depth_file) in enumerate(zip(frame_files, depth_files)):
             frame_name = frame_file.stem
+
+            if frame_name in existing_vr:
+                skipped += 1
+                continue
 
             # --- read 1 frame + 1 depth map (auto-freed each iteration) ---
             frame = cv2.imread(str(frame_file))
@@ -290,6 +306,7 @@ class ProcessingOrchestrator:
             # --- write ONLY the VR frame (1 encrypted write through gocryptfs) ---
             cv2.imwrite(str(vr_dir / f"{frame_name}.png"), vr_frame)
             del vr_frame
+            rendered += 1
 
             if progress_tracker is not None and (i % 10 == 0 or i == num_frames - 1):
                 progress_tracker.update_progress(
@@ -300,13 +317,21 @@ class ProcessingOrchestrator:
                     step_progress=i + 1,
                     step_total=num_frames,
                 )
-            if i % 200 == 0 or i == num_frames - 1:
+            if rendered % 200 == 0 or i == num_frames - 1:
                 el = time.time() - t0
-                rate = (i + 1) / el if el > 0 else 0
-                eta = (num_frames - i - 1) / rate if rate > 0 else 0
-                print(f"  [{i + 1}/{num_frames}] {rate:.1f} fps, ETA {eta/60:.0f}min")
+                rate = rendered / el if el > 0 else 0
+                todo = num_frames - (skipped + rendered)
+                eta = todo / rate if rate > 0 else 0
+                print(
+                    f"  [{i + 1}/{num_frames}] rendered={rendered} skipped={skipped} "
+                    f"{rate:.1f} fps, ETA {eta/60:.0f}min"
+                )
 
-        print(step_complete(f"Streaming render: {num_frames} VR frames"))
+        print(
+            step_complete(
+                f"Streaming render: {rendered} new + {skipped} resumed = {num_frames} VR frames"
+            )
+        )
 
         # --- step 8: encode final video (unchanged) ---
         vr_frames_dir = directories.get("vr_frames")

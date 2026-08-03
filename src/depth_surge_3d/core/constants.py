@@ -59,6 +59,7 @@ DEFAULT_SETTINGS = {
     "min_resolution": "1080p",
     "preserve_audio": True,
     "keep_intermediates": True,
+    "resume": False,  # 继续处理: 复用已存在的中间产物(帧/深度/VR帧), 跳过已完成阶段
     "apply_distortion": True,
     "output_dir": "./output",
     "experimental_frame_interpolation": False,  # Experimental feature with quality warnings

@@ -39,6 +39,7 @@ DRES=448
 MODEL="${MODEL:-}"
 START=""
 END=""
+RESUME=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,6 +52,7 @@ while [ $# -gt 0 ]; do
     --model)         MODEL="$2"; shift 2;;
     --start)         START="$2"; shift 2;;
     --end)           END="$2"; shift 2;;
+    --resume)        RESUME=1; shift;;    # 继续处理: 复用已存在的帧/深度/VR帧
     *) echo "未知选项: $1"; exit 1;;
   esac
 done
@@ -67,11 +69,15 @@ cd "$DS"
 IN="$INPUT"
 ROT=$(ffprobe -v error -select_streams v:0 -show_entries stream_side_data=rotation -of default=nw=1:nk=1 "$INPUT" 2>/dev/null | tr -d '[:space:]')
 if [ -n "$ROT" ] && [ "$ROT" != "0" ] && [ "$ROT" != "N/A" ]; then
-  echo "[0] 检测到 rotation=$ROT, ffmpeg autorotate 转正..."
-  SS=""; [ -n "$START" ] && SS="-ss $START"
-  TO=""; [ -n "$END" ] && TO="-to $((END-START))"
   IN="$OUTBASE/_autorotated.mp4"
-  ffmpeg -y -v error $SS $TO -i "$INPUT" -c:v libx264 -crf 18 -an "$IN"
+  if [ -f "$IN" ]; then
+    echo "[0] RESUME: $IN 已存在, 跳过 autorotate"
+  else
+    echo "[0] 检测到 rotation=$ROT, ffmpeg autorotate 转正..."
+    SS=""; [ -n "$START" ] && SS="-ss $START"
+    TO=""; [ -n "$END" ] && TO="-to $((END-START))"
+    ffmpeg -y -v error $SS $TO -i "$INPUT" -c:v libx264 -crf 18 -an "$IN"
+  fi
   START=""; END=""   # 切片已在上面完成
 fi
 
@@ -80,9 +86,23 @@ echo "== v2+Large@${DRES} baseline=${BASELINE}m focal=${FOCAL}px → max_disp≈
 
 for FILL in $FILLS; do
   echo "===== fill=$FILL ====="
+  # 首次运行: depth_surge_3d.py 在 --output-dir 下建 <stem>_<timestamp> 子目录;
+  # --resume 时: 复用该子目录 (中间产物所在), 跳过已完成的帧/深度/VR帧。
+  OUTDIR="$OUTBASE/${FILL}_out"
+  RESUME_FLAG=""
+  if [ "$RESUME" = 1 ]; then
+    JOB_DIR=$(find "$OUTDIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)
+    if [ -n "$JOB_DIR" ]; then
+      OUTDIR="$JOB_DIR"
+      RESUME_FLAG="--resume"
+      echo "RESUME: 复用任务目录 $OUTDIR"
+    else
+      echo "RESUME: $OUTDIR 下无既有任务目录, 按全新运行"
+    fi
+  fi
   env CUDA_VISIBLE_DEVICES=$GPU PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     $PY depth_surge_3d.py "$IN" \
-    --output-dir "$OUTBASE/${FILL}_out" \
+    --output-dir "$OUTDIR" $RESUME_FLAG \
     --format side_by_side --vr-resolution "$VR" \
     --depth-model-version v2 --model "$MODEL" \
     --depth-resolution "$DRES" --device cuda --no-distortion \

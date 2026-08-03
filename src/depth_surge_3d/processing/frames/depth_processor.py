@@ -89,6 +89,32 @@ class DepthMapProcessor:
             - Filesystem I/O (cache reads/writes)
             - Depth map image writes
         """
+        # Resume: if every frame already has a depth map on disk, reuse their PATHS
+        # (lazy read by the renderer) and skip GPU inference entirely. Must run
+        # BEFORE the legacy in-memory loader below (which would OOM on long 4K video).
+        if settings.get("resume") and "depth_maps" in directories:
+            depth_dir = directories["depth_maps"]
+            if depth_dir.exists():
+                on_disk = {p.stem: p for p in depth_dir.glob("*.png")}
+                if len(on_disk) >= len(frame_files) and all(
+                    ff.stem in on_disk for ff in frame_files
+                ):
+                    depth_files = [on_disk[ff.stem] for ff in frame_files]
+                    print(
+                        f"Step 2/7: RESUME — reusing {len(depth_files)} existing depth maps "
+                        f"(skipping GPU inference)"
+                    )
+                    if progress_tracker:
+                        progress_tracker.update_progress(
+                            "Resumed depth maps (already exist)",
+                            phase="depth_estimation",
+                            frame_num=len(depth_files),
+                            step_name="Depth Map Generation",
+                            step_progress=len(depth_files),
+                            step_total=len(depth_files),
+                        )
+                    return depth_files
+
         # Check if depth maps already exist (only if keep_intermediates is enabled)
         if settings.get("keep_intermediates") and "depth_maps" in directories:
             existing = self._try_load_existing_depth_maps(
@@ -380,6 +406,26 @@ class DepthMapProcessor:
             chunk_end = min(chunk_start + chunk_size, num_frames)
             chunk_files = frame_files[chunk_start:chunk_end]
             chunk_num = chunk_start // chunk_size + 1
+
+            # Resume: skip chunks whose depth maps are all already on disk
+            # (handles a depth stage interrupted mid-way — done chunks are reused).
+            depth_dir = directories.get("depth_maps")
+            if (
+                settings.get("resume")
+                and depth_dir
+                and all((depth_dir / f"{f.stem}.png").exists() for f in chunk_files)
+            ):
+                print(f"  RESUME: chunk {chunk_num}/{total_chunks} depth complete, skipping")
+                if progress_tracker:
+                    progress_tracker.update_progress(
+                        f"RESUME chunk {chunk_num}/{total_chunks}: Depth {chunk_end}/{num_frames}",
+                        phase="depth_estimation",
+                        frame_num=chunk_end,
+                        step_name="Depth Map Generation",
+                        step_progress=chunk_end,
+                        step_total=num_frames,
+                    )
+                continue
 
             # Load chunk frames
             chunk_frames = self._load_chunk_frames(chunk_files, settings)

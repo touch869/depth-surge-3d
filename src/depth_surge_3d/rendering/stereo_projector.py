@@ -92,6 +92,7 @@ class StereoProjector:
         processing_mode: str | None = None,
         experimental_frame_interpolation: bool | None = None,
         depth_resolution: str | None = None,
+        resume: bool | None = None,
     ) -> bool:
         """
         Process video to create 3D VR version.
