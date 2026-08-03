@@ -97,14 +97,10 @@ class DepthMapProcessor:
             if existing is not None:
                 return existing
 
-        # Check global depth cache (works across different output batches)
+        # NOTE: global depth cache disabled — it serializes loaded ndarray, but we now
+        # return depth map FILE PATHS (lazy read, low memory). Depth maps are persisted
+        # to disk per-job at directories["depth_maps"], which serves the same purpose.
         video_path = settings.get("video_path")
-        if video_path:
-            cached = self._try_load_cached_depth_maps(
-                video_path, settings, len(frame_files), progress_tracker
-            )
-            if cached is not None:
-                return cached
 
         print("Step 2/7: Generating depth maps (temporal consistency enabled)...")
         print("  Using memory-efficient chunked processing...")
@@ -118,17 +114,13 @@ class DepthMapProcessor:
                 step_total=len(frame_files),
             )
 
-        depth_maps = self._generate_depth_maps_chunked(
+        depth_files = self._generate_depth_maps_chunked(
             frame_files, settings, directories, progress_tracker
         )
-        if depth_maps is None:
+        if depth_files is None:
             return None
 
-        # Save to global cache for future runs
-        if video_path and depth_maps is not None:
-            self._save_to_depth_cache(video_path, settings, depth_maps)
-
-        return depth_maps
+        return depth_files
 
     def _determine_chunk_params(
         self, frame_w: int, frame_h: int, depth_resolution: str = "auto"
@@ -378,7 +370,9 @@ class DepthMapProcessor:
         self._clear_gpu_memory()
 
         # Process all chunks
-        all_depth_maps: list[Any] = []
+        # NOTE: depth maps are written to disk per chunk (directories["depth_maps"]).
+        # We do NOT accumulate loaded arrays in memory — that OOMs on long 4K video
+        # (2699 frames × 4K depth). Return disk paths so the renderer reads lazily.
         num_frames = len(frame_files)
         total_chunks = (num_frames + chunk_size - 1) // chunk_size
 
@@ -398,9 +392,7 @@ class DepthMapProcessor:
                 chunk_depth_maps = self._process_chunk_depth(
                     chunk_frames, chunk_files, settings, directories, input_size, progress_tracker
                 )
-                all_depth_maps.extend(chunk_depth_maps)  # type: ignore[arg-type]
-
-                # Clear references and GPU cache
+                # Free chunk-local memory immediately (do NOT accumulate across chunks)
                 del chunk_frames
                 del chunk_depth_maps
                 self._clear_gpu_memory()
@@ -420,7 +412,14 @@ class DepthMapProcessor:
                 print(f"Error processing chunk {chunk_start}-{chunk_end}: {e}")
                 return None
 
-        return np.array(all_depth_maps)
+        # Return depth map file paths (lazy-read by renderer), NOT loaded arrays.
+        depth_dir = directories.get("depth_maps")
+        if depth_dir and depth_dir.exists():
+            depth_files = sorted(depth_dir.glob("*.png"))
+            if depth_files:
+                return depth_files
+        print("ERROR: depth maps not found on disk after chunked generation")
+        return None
 
     def _generate_depth_maps_batch(
         self, frames: np.ndarray, settings: dict[str, Any], progress_tracker

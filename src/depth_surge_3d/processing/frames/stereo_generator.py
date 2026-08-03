@@ -80,20 +80,18 @@ class StereoPairGenerator:
 
     def create_stereo_pairs(
         self,
-        frames: np.ndarray,
-        depth_maps: np.ndarray,
         frame_files: list[Path],
+        depth_files: list[Path],
         directories: dict[str, Path],
         settings: dict[str, Any],
         progress_tracker=None,
     ) -> bool:
         """
-        Generate stereo pairs using multiprocessing.
+        Generate stereo pairs (streaming: reads each frame + depth map from disk lazily).
 
         Args:
-            frames: Array of frame images
-            depth_maps: Array of depth map images
-            frame_files: List of frame file paths
+            frame_files: List of frame file PATHS (read one at a time — low memory)
+            depth_files: List of depth map file PATHS (read one at a time)
             directories: Dictionary of processing directories
             settings: Processing settings with baseline, focal_length, etc.
             progress_tracker: Optional progress tracker
@@ -102,54 +100,62 @@ class StereoPairGenerator:
             True if successful, False otherwise
 
         Side effects:
-            - Parallel processing via multiprocessing
             - Writes stereo pair images to disk
         """
         try:
-            # Determine number of worker processes (leave 1-2 cores for system)
-            num_workers = min(8, max(1, mp.cpu_count() - 2))  # PATCHED: cap at 8 to avoid 62-worker fork abort on 1080p frames
-            print(f"  Using {num_workers} parallel workers for stereo generation...")
+            num_frames = len(frame_files)
+            print(f"  Streaming stereo generation over {num_frames} frames (lazy disk read)...")
 
-            # Prepare arguments for parallel processing
-            args_list = []
-            for frame, depth_map, frame_file in zip(frames, depth_maps, frame_files):
+            results = []
+            for i, (frame_file, depth_file) in enumerate(zip(frame_files, depth_files)):
+                # Read ONE frame + ONE depth map from disk (auto-freed each iteration)
+                frame = cv2.imread(str(frame_file))
+                # Depth maps are saved as uint8 (depth*255); restore float [0,1]
+                # range that depth_to_disparity expects.
+                depth_uint = cv2.imread(str(depth_file), cv2.IMREAD_UNCHANGED)
+                if frame is None or depth_uint is None:
+                    print(f"Warning: could not read frame {i} or its depth map, skipping")
+                    results.append(None)
+                    continue
+                depth_map = depth_uint.astype(np.float32) / 255.0
+                del depth_uint
+
                 frame_name = frame_file.stem
 
                 # Determine save paths
                 left_path = (
                     str(directories["left_frames"] / f"{frame_name}.png")
-                    if settings["keep_intermediates"] and "left_frames" in directories
+                    if settings.get("keep_intermediates", True) and "left_frames" in directories
                     else None
                 )
                 right_path = (
                     str(directories["right_frames"] / f"{frame_name}.png")
-                    if settings["keep_intermediates"] and "right_frames" in directories
+                    if settings.get("keep_intermediates", True) and "right_frames" in directories
                     else None
                 )
 
-                args_list.append((frame, depth_map, frame_name, left_path, right_path, settings))
-
-            # Process stereo pairs (PATCHED: serial - mp.Pool fork aborts with CUDA model loaded)
-            results = []
-            for i, args in enumerate(args_list):
-                result = _process_single_stereo_pair(args)
+                result = _process_single_stereo_pair(
+                    (frame, depth_map, frame_name, left_path, right_path, settings)
+                )
                 results.append(result)
 
+                # Free this frame's memory before reading the next
+                del frame, depth_map
+
                 # Update progress
-                if progress_tracker is not None and (i % 5 == 0 or i == len(args_list) - 1):
+                if progress_tracker is not None and (i % 5 == 0 or i == num_frames - 1):
                     progress_tracker.update_progress(
                         "Creating stereo pairs",
                         phase="stereo_generation",
                         frame_num=i + 1,
                         step_name="Stereo Pair Creation",
                         step_progress=i + 1,
-                        step_total=len(frames),
+                        step_total=num_frames,
                     )
 
                 # Send preview frame for left eye
                 if progress_tracker and hasattr(progress_tracker, "send_preview_frame"):
-                    if i % PREVIEW_FRAME_SAMPLE_RATE == 0 or i == len(args_list) - 1:
-                        left_path = args_list[i][3]  # left_path from args
+                    if i % PREVIEW_FRAME_SAMPLE_RATE == 0 or i == num_frames - 1:
                         if left_path:
                             progress_tracker.send_preview_frame(
                                 Path(left_path), "stereo_left", i + 1
