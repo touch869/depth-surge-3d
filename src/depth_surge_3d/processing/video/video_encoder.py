@@ -78,9 +78,33 @@ class VideoEncoder:
         output_path = output_dir / output_filename
 
         # Build base FFmpeg command
-        base_fps = settings.get("target_fps", DEFAULT_FALLBACK_FPS)
-        if base_fps is None or str(base_fps) == "None" or base_fps == "original":
-            base_fps = 30
+        # Use source video fps for output (default fallback only if undetermined).
+        # BUG: hardcoded 30 fps made 20fps source play 1.5x faster (audio drift + accel). 2026-08-03
+        target_fps_setting = settings.get("target_fps")
+        if (
+            target_fps_setting is None
+            or str(target_fps_setting) == "None"
+            or target_fps_setting == "original"
+        ):
+            # Probe the source video's fps so output plays at native speed.
+            try:
+                probe = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error",
+                        "-select_streams", "v:0",
+                        "-show_entries", "stream=r_frame_rate",
+                        "-of", "csv=p=0", str(original_video),
+                    ],
+                    capture_output=True, text=True,
+                )
+                num, _, denom = probe.stdout.strip().partition("/")
+                base_fps = float(num) / float(denom) if denom else float(num)
+                if not base_fps or base_fps <= 0:
+                    raise ValueError
+            except Exception:
+                base_fps = DEFAULT_FALLBACK_FPS
+        else:
+            base_fps = target_fps_setting
 
         cmd = [
             "ffmpeg",
