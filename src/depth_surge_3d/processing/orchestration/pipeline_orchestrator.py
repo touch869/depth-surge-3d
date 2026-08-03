@@ -25,6 +25,13 @@ from ...utils import (
     title_bar,
     completion_banner,
 )
+from ...utils.imaging.image_processing import (
+    depth_to_disparity,
+    create_shifted_image,
+    resize_image,
+    create_vr_frame,
+    apply_center_crop,
+)
 
 
 class NullProgressTracker:
@@ -211,6 +218,111 @@ class ProcessingOrchestrator:
             progress_tracker,
         )
 
+    def _render_streaming(
+        self,
+        frame_files: list[Path],
+        depth_files: list[Path],
+        directories: dict[str, Path],
+        settings: dict[str, Any],
+        fps: float,
+        video_path: str,
+        output_path: Path,
+        progress_tracker=None,
+    ) -> bool:
+        """
+        Single-frame streaming render: fuses steps 3→7 (stereo, crop, VR assembly)
+        into one per-frame loop that holds ONE frame in memory and writes ONLY the
+        final VR frame to disk.
+
+        Valid only when apply_distortion=False and upscale_model='none' (our
+        production default). With crop_factor=1.0 (default), center crop is identity.
+
+        Peak memory: 1 frame + 1 depth map (~hundreds of MB) regardless of video
+        length — avoids the OOM of loading all frames, and writes 1 encrypted frame
+        through gocryptfs per iteration (vs ~6 in the phase-based pipeline).
+        """
+        from ...utils.path_utils import generate_output_filename
+
+        num_frames = len(frame_files)
+        baseline = settings["baseline"]
+        focal_length = settings["focal_length"]
+        per_eye_w = settings["per_eye_width"]
+        per_eye_h = settings["per_eye_height"]
+        vr_format = settings["vr_format"]
+        crop_factor = max(0.5, min(1.0, float(settings.get("crop_factor", 1.0))))
+
+        vr_dir = directories["vr_frames"]
+        vr_dir.mkdir(parents=True, exist_ok=True)
+
+        print(title_bar("Streaming render (single-frame pipeline: stereo→crop→VR)"))
+        print(f"  {num_frames} frames, per_eye={per_eye_w}x{per_eye_h}, crop_factor={crop_factor}")
+        t0 = time.time()
+
+        for i, (frame_file, depth_file) in enumerate(zip(frame_files, depth_files)):
+            frame_name = frame_file.stem
+
+            # --- read 1 frame + 1 depth map (auto-freed each iteration) ---
+            frame = cv2.imread(str(frame_file))
+            depth_uint = cv2.imread(str(depth_file), cv2.IMREAD_UNCHANGED)
+            if frame is None or depth_uint is None:
+                print(f"Warning: could not read frame {i} or depth, skipping")
+                continue
+            depth_map = depth_uint.astype(np.float32) / 255.0
+            del depth_uint
+
+            # --- step 3: stereo (depth → disparity → shift left/right) ---
+            disparity = depth_to_disparity(depth_map, baseline, focal_length)
+            left_img = create_shifted_image(frame, disparity, "left")
+            right_img = create_shifted_image(frame, disparity, "right")
+            del frame, depth_map, disparity
+
+            # --- step 5: center crop (identity when crop_factor=1.0) ---
+            if crop_factor < 1.0:
+                left_img = apply_center_crop(left_img, crop_factor)
+                right_img = apply_center_crop(right_img, crop_factor)
+
+            # --- step 7: VR assembly (resize to per_eye + hstack) ---
+            left_final = resize_image(left_img, per_eye_w, per_eye_h)
+            right_final = resize_image(right_img, per_eye_w, per_eye_h)
+            vr_frame = create_vr_frame(left_final, right_final, vr_format)
+            del left_img, right_img, left_final, right_final
+
+            # --- write ONLY the VR frame (1 encrypted write through gocryptfs) ---
+            cv2.imwrite(str(vr_dir / f"{frame_name}.png"), vr_frame)
+            del vr_frame
+
+            if progress_tracker is not None and (i % 10 == 0 or i == num_frames - 1):
+                progress_tracker.update_progress(
+                    f"Streaming render {i + 1}/{num_frames}",
+                    phase="streaming_render",
+                    frame_num=i + 1,
+                    step_name="Streaming Render",
+                    step_progress=i + 1,
+                    step_total=num_frames,
+                )
+            if i % 200 == 0 or i == num_frames - 1:
+                el = time.time() - t0
+                rate = (i + 1) / el if el > 0 else 0
+                eta = (num_frames - i - 1) / rate if rate > 0 else 0
+                print(f"  [{i + 1}/{num_frames}] {rate:.1f} fps, ETA {eta/60:.0f}min")
+
+        print(step_complete(f"Streaming render: {num_frames} VR frames"))
+
+        # --- step 8: encode final video (unchanged) ---
+        vr_frames_dir = directories.get("vr_frames")
+        if not vr_frames_dir:
+            return self._handle_step_error("VR frames directory not found")
+        success = self.video_encoder.create_video(
+            vr_frames_dir, directories["base"], video_path, settings
+        )
+        if success:
+            output_filename = generate_output_filename(
+                Path(video_path).name, settings["vr_format"], settings["vr_resolution"]
+            )
+            print(step_complete("Step 8: Created final video"))
+            self._print_saved_to(directories["base"], f"Final output: {output_filename}")
+        return success
+
     def _execute_remaining_steps(  # noqa: C901
         self,
         directories: dict[str, Path],
@@ -225,7 +337,6 @@ class ProcessingOrchestrator:
     ) -> bool:
         """
         Execute remaining pipeline steps after depth map generation.
-
         Args:
             directories: Dictionary of processing directories
             settings: Processing settings
@@ -245,6 +356,23 @@ class ProcessingOrchestrator:
             - Progress updates
         """
         num_frames = len(frame_files)
+
+        # ── FAST PATH: single-frame streaming (steps 3→7 fused) ──
+        # When no fisheye distortion and no AI upscaling (our production default:
+        # --no-distortion, crop_factor=1.0, no upscale), the per-frame chain is
+        # stereo → (crop is identity) → resize → hstack → write VR frame.
+        # Fusing into one loop writes ONLY the VR frame (1 encrypted write/frame
+        # through gocryptfs instead of ~6), and holds 1 frame in memory (no OOM).
+        # Falls back to the phase-based pipeline below if distortion/upscale enabled.
+        if (
+            not settings.get("apply_distortion", True)
+            and settings.get("upscale_model", "none") == "none"
+            and "vr_frames" in directories
+        ):
+            return self._render_streaming(
+                frame_files, depth_files, directories, settings,
+                fps, video_path, output_path, progress_tracker,
+            )
 
         # Step 3: Create stereo pairs (delegated to stereo_generator)
         # Reads frames + depth maps from disk lazily (streaming, low memory).
