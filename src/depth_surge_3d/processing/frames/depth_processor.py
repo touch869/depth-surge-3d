@@ -34,6 +34,8 @@ from ...core.constants import (
 from ...utils import (
     get_cached_depth_maps,
     save_depth_maps_to_cache,
+    save_depth_dir_to_cache,
+    load_cache_to_depth_dir,
     get_cache_size,
 )
 from ...utils import calculate_optimal_chunk_size, get_vram_info
@@ -123,9 +125,29 @@ class DepthMapProcessor:
             if existing is not None:
                 return existing
 
-        # NOTE: global depth cache disabled — it serializes loaded ndarray, but we now
-        # return depth map FILE PATHS (lazy read, low memory). Depth maps are persisted
-        # to disk per-job at directories["depth_maps"], which serves the same purpose.
+        # Streaming global depth cache: try loading from cache into per-job depth dir
+        # (file-by-file, zero full-array memory — compatible with lazy-read renderer).
+        if settings.get("keep_intermediates") and "depth_maps" in directories:
+            video_path = settings.get("video_path", "")
+            if video_path:
+                depth_dir = directories["depth_maps"]
+                cached = load_cache_to_depth_dir(video_path, settings, frame_files, depth_dir)
+                if cached is not None:
+                    print(
+                        f"Step 2/7: Loaded {len(cached)} depth maps from global cache "
+                        f"(skipping GPU inference)"
+                    )
+                    if progress_tracker:
+                        progress_tracker.update_progress(
+                            "Loaded depth maps from global cache",
+                            phase="depth_estimation",
+                            frame_num=len(cached),
+                            step_name="Depth Map Generation",
+                            step_progress=len(cached),
+                            step_total=len(cached),
+                        )
+                    return cached
+
         video_path = settings.get("video_path")
 
         print("Step 2/7: Generating depth maps (temporal consistency enabled)...")
@@ -145,6 +167,20 @@ class DepthMapProcessor:
         )
         if depth_files is None:
             return None
+
+        # Streaming global cache sync: flush per-job depth PNGs → cache (file-by-file)
+        if settings.get("keep_intermediates") and "depth_maps" in directories:
+            video_path = settings.get("video_path", "")
+            if video_path:
+                ok = save_depth_dir_to_cache(
+                    video_path, settings, directories["depth_maps"], frame_files
+                )
+                if ok:
+                    from ...utils import get_cache_size
+                    cache_entries, cache_bytes = get_cache_size()
+                    cache_mb = cache_bytes / (1024 * 1024)
+                    print(f"  Synced {len(depth_files)} depth maps to global cache")
+                    print(f"  Cache: {cache_entries} entries, {cache_mb:.1f} MB total")
 
         return depth_files
 

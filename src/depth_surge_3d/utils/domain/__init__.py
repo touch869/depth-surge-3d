@@ -8,6 +8,8 @@ from .depth_cache import (
     compute_cache_key,
     get_cached_depth_maps,
     save_depth_maps_to_cache,
+    save_depth_dir_to_cache,
+    load_cache_to_depth_dir,
     clear_cache,
     get_cache_size,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "compute_cache_key",
     "get_cached_depth_maps",
     "save_depth_maps_to_cache",
+    "save_depth_dir_to_cache",
+    "load_cache_to_depth_dir",
     "clear_cache",
     "get_cache_size",
     # Resolution

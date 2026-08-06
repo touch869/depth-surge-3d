@@ -197,6 +197,118 @@ def save_depth_maps_to_cache(
         return False
 
 
+# ---------------------------------------------------------------------------
+# Streaming (file-based) cache sync — 流式渲染兼容版
+# 原版 save/load 接口收发全量 ndarray, 与逐帧写盘流式架构冲突 (4K 长视频 OOM),
+# 故 da95156 删掉了调用。以下两个函数全程逐帧 I/O, 零全量内存:
+#   save: per-job depth PNG (uint8, depth×255) → cache PNG (uint16, depth×1000)
+#   load: cache PNG → per-job depth PNG (供渲染器惰性读盘)
+# ---------------------------------------------------------------------------
+
+
+def save_depth_dir_to_cache(
+    video_path: str,
+    depth_settings: dict[str, Any],
+    depth_dir: Path,
+    frame_files: list[Path],
+) -> bool:
+    """
+    Sync per-job depth map PNGs into the global cache (streaming, frame by frame).
+
+    Args:
+        video_path: Path to input video (cache key)
+        depth_settings: Depth-related settings (cache key)
+        depth_dir: Per-job depth maps directory (uint8 PNGs named <frame_stem>.png)
+        frame_files: Source frame files (naming + count)
+
+    Returns:
+        True if fully synced, False otherwise (non-critical)
+    """
+    try:
+        cache_key = compute_cache_key(video_path, depth_settings)
+        entry_dir = get_cache_dir() / cache_key
+        entry_dir.mkdir(parents=True, exist_ok=True)
+
+        metadata = {
+            "num_frames": len(frame_files),
+            "video_path": str(video_path),
+            "depth_settings": {
+                k: depth_settings.get(k)
+                for k in [
+                    "depth_model_version",
+                    "model_size",
+                    "depth_resolution",
+                    "use_metric_depth",
+                    "device",
+                ]
+            },
+            "cache_version": "1.0",
+        }
+        with open(entry_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        for i, frame_file in enumerate(frame_files):
+            src = depth_dir / f"{frame_file.stem}.png"
+            img = cv2.imread(str(src), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                return False
+            depth_u16 = (img.astype(np.float32) / 255.0 * 1000.0).astype(np.uint16)
+            if not cv2.imwrite(str(entry_dir / f"depth_{i:06d}.png"), depth_u16):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def load_cache_to_depth_dir(
+    video_path: str,
+    depth_settings: dict[str, Any],
+    frame_files: list[Path],
+    depth_dir: Path,
+) -> list[Path] | None:
+    """
+    Restore depth maps from global cache into a per-job directory (streaming).
+
+    Args:
+        video_path: Path to input video (cache key)
+        depth_settings: Depth-related settings (cache key)
+        frame_files: Source frame files (naming + count)
+        depth_dir: Per-job depth maps directory to populate
+
+    Returns:
+        List of written depth map paths on full hit, None on miss/incomplete
+    """
+    try:
+        cache_key = compute_cache_key(video_path, depth_settings)
+        entry_dir = get_cache_dir() / cache_key
+        metadata_file = entry_dir / "metadata.json"
+        if not metadata_file.exists():
+            return None
+
+        with open(metadata_file, "r") as f:
+            metadata = json.load(f)
+        if metadata.get("num_frames") != len(frame_files):
+            return None
+
+        depth_dir.mkdir(parents=True, exist_ok=True)
+        out_paths: list[Path] = []
+        for i, frame_file in enumerate(frame_files):
+            cache_png = entry_dir / f"depth_{i:06d}.png"
+            img = cv2.imread(str(cache_png), cv2.IMREAD_GRAYSCALE)
+            # uint16 read needs IMREAD_UNCHANGED; GRAYSCALE forces uint8 (truncates).
+            img16 = cv2.imread(str(cache_png), cv2.IMREAD_UNCHANGED)
+            if img16 is None:
+                return None
+            depth_u8 = (img16.astype(np.float32) / 1000.0 * 255.0).astype(np.uint8)
+            out_path = depth_dir / f"{frame_file.stem}.png"
+            if not cv2.imwrite(str(out_path), depth_u8):
+                return None
+            out_paths.append(out_path)
+        return out_paths
+    except Exception:
+        return None
+
+
 def clear_cache() -> int:
     """
     Clear all cached depth maps.
