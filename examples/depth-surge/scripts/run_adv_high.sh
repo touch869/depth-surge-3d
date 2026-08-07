@@ -76,7 +76,9 @@ if [ -n "$ROT" ] && [ "$ROT" != "0" ] && [ "$ROT" != "N/A" ]; then
     echo "[0] 检测到 rotation=$ROT, ffmpeg autorotate 转正..."
     SS=""; [ -n "$START" ] && SS="-ss $START"
     TO=""; [ -n "$END" ] && TO="-to $((END-START))"
-    ffmpeg -y -v error $SS $TO -i "$INPUT" -c:v libx264 -crf 18 -an "$IN"
+    # 保住源音频 (-c:a copy, 不重编码) — DS 编码时从 _autorotated.mp4 取音频。
+    # 之前用 -an 把音频剥了 → DS fallback 取到无声视频 → 成品无音轨。
+    ffmpeg -y -v error $SS $TO -i "$INPUT" -c:v libx264 -crf 18 -c:a copy "$IN"
   fi
   START=""; END=""   # 切片已在上面完成
 fi
